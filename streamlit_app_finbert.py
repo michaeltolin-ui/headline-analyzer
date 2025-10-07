@@ -1,34 +1,46 @@
-# streamlit_app_finbert.py
+# streamlit_app_distil.py
+# MVP: DistilRoBERTa (financial sentiment) + deep trader-style rule boosts + highlights + sector tag
+# Free to run (no paid API). Great fit for Streamlit Community Cloud.
+
 import re
 import torch
 import streamlit as st
+from typing import Dict, List, Tuple
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-# ---------- Page ----------
-st.set_page_config(page_title="Headline Analyzer (FinBERT)", page_icon="🧠", layout="centered")
-st.title("🧠 AI Headline Analyzer — FinBERT + Sector Tag")
-st.caption("Paste any market/financial headline → AI returns Bullish/Bearish/Neutral, confidence, and sector tag.")
+# ---------------- Page ----------------
+st.set_page_config(page_title="Headline Analyzer (Distil Financial + Rules)", page_icon="🧠", layout="centered")
+st.title("🧠 AI Headline Analyzer — Distilled Financial Model + Rule Boosts")
+st.caption("Paste a market/financial headline → model + trader-phrase rules return Bullish/Bearish/Neutral, confidence, sector, and highlights.")
 
-# ---------- Load FinBERT (cached) ----------
+# ---------------- Load distilled financial model ----------------
 @st.cache_resource(show_spinner=True)
-def load_finbert():
-    model_name = "ProsusAI/finbert"
+def load_model():
+    """
+    Loads a small financial-sentiment model.
+    Model: DistilRoBERTa fine-tuned on financial news sentiment.
+    (Fallback-friendly; CPU OK for headlines.)
+    """
+    model_name = "mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis"
     tok = AutoTokenizer.from_pretrained(model_name)
     mdl = AutoModelForSequenceClassification.from_pretrained(model_name)
-    return tok, mdl
+    id2label = mdl.config.id2label
+    label2id = mdl.config.label2id
+    # Most financial sentiment models use: 0=negative, 1=neutral, 2=positive (but we rely on id2label just in case)
+    return tok, mdl, id2label, label2id
 
-tokenizer, model = load_finbert()
-id2label = {0: "Bearish", 1: "Neutral", 2: "Bullish"}
+tokenizer, model, id2label, label2id = load_model()
 
-# ---------- Sector detection (simple keyword map) ----------
+# ---------------- Sector detection ----------------
 SECTOR_MAP = {
-    "Tech":        [r"\bAI\b", r"\bchip(s)?\b", r"\bsemiconductor(s)?\b", r"\bGPU\b", r"\bcloud\b", r"\bsoftware\b", r"\bsmartphone(s)?\b"],
-    "Consumer":    [r"\bretail\b", r"\bconsumer\b", r"\bstore(s)?\b", r"\bapparel\b", r"\bgrocery\b", r"\be-commerce\b"],
-    "Auto":        [r"\bEV\b", r"\bvehicle(s)?\b", r"\bautomaker(s)?\b", r"\bdealership(s)?\b"],
-    "Energy":      [r"\boil\b", r"\bWTI\b", r"\bnatural gas\b", r"\bOPEC\b", r"\brefiner(y|ies)\b"],
-    "Financials":  [r"\bbank(s)?\b", r"\binsurer(s)?\b", r"\bcredit\b", r"\bfintech\b", r"\bcentral bank\b", r"\bBank of England\b", r"\bFederal Reserve\b", r"\bECB\b"],
-    "Healthcare":  [r"\bFDA\b", r"\btrial\b", r"\bphase (II|III)\b", r"\bdrug\b", r"\btherapy\b", r"\bbiotech\b"],
-    "Industrial":  [r"\bmanufactur(e|ing)\b", r"\bsupply chain\b", r"\blogistics\b", r"\bfreight\b"],
+    "Tech": [r"\bAI\b", r"\bchip(s)?\b", r"\bsemiconductor(s)?\b", r"\bGPU\b", r"\bsoftware\b", r"\bcloud\b", r"\bsmartphone(s)?\b"],
+    "Consumer": [r"\bretail\b", r"\bconsumer\b", r"\bstore(s)?\b", r"\bapparel\b", r"\bgrocery\b", r"\be-commerce\b"],
+    "Auto": [r"\bEV\b", r"\bvehicle(s)?\b", r"\bautomaker(s)?\b", r"\bdealership(s)?\b", r"\bauto(s)?\b"],
+    "Energy": [r"\boil\b", r"\bWTI\b", r"\bnatural gas\b", r"\bOPEC\b", r"\brefiner(y|ies)\b", r"\bBrent\b"],
+    "Financials": [r"\bbank(s)?\b", r"\binsurer(s)?\b", r"\bcredit\b", r"\bbroker(s)?\b", r"\bfintech\b",
+                   r"\bcentral bank\b", r"\bFederal Reserve\b", r"\bFed\b", r"\bECB\b", r"\bBank of England\b"],
+    "Healthcare": [r"\bFDA\b", r"\btrial\b", r"\bphase (II|III)\b", r"\bdrug\b", r"\btherapy\b", r"\bbiotech\b"],
+    "Industrial": [r"\bmanufactur(e|ing)\b", r"\bsupply chain\b", r"\blogistics\b", r"\bfreight\b", r"\baerospace\b"],
     "Communications": [r"\bmedia\b", r"\bstreaming\b", r"\badvertising\b", r"\bsocial\b", r"\btelecom\b"],
 }
 
@@ -40,113 +52,21 @@ def detect_sector(text: str) -> str:
                 return sector
     return "General"
 
-# ---------- Tiny finance-aware hints (optional nudge) ----------
-BEARISH_HINTS = [
-    r"\bwarn(s|ed|ing)?\b", r"\bcut(s|ting)?\b", r"\bguidance cut(s|ting)?\b", r"\bprobe(s|d)?\b",
-    r"\binvestigat(e|ion|ed|es)\b", r"\brecall(s|ed|ing)?\b", r"\blayoff(s)?\b", r"\bplunge(s|d)?\b"
-]
-BULLISH_HINTS = [
-    r"\braise(s|d|ing)?\b", r"\bbeat(s|en)?\b", r"\bboost(s|ed|ing)?\b", r"\bupgrade(s|d)?\b",
-    r"\bstrong demand\b", r"\brecord\b", r"\baccelerat(e|es|ed|ing)\b"
-]
+# ---------------- Deep trader-style boosts ----------------
+# Heavily used action words in headlines; we weight them modestly so the model remains primary.
+# You can tune weights later (+/- 0.05 to 0.40 typical). We keep them small but meaningful.
 
-def rule_bias(text: str) -> float:
-    # small nudge: +0.12 for bullish phrase, -0.12 for bearish phrase (kept tiny so FinBERT leads)
-    bias = 0.0
-    if any(re.search(p, text, re.I) for p in BULLISH_HINTS): bias += 0.12
-    if any(re.search(p, text, re.I) for p in BEARISH_HINTS): bias -= 0.12
-    return bias
-
-# ---------- Inference ----------
-def analyze(headline: str):
-    inputs = tokenizer(headline, return_tensors="pt", truncation=True)
-    with torch.no_grad():
-        logits = model(**inputs).logits
-        probs = torch.softmax(logits, dim=-1).squeeze(0)
-
-    pred_idx = int(torch.argmax(probs).item())
-    base_conf = float(probs[pred_idx].item())  # 0..1
-    sentiment = id2label[pred_idx]
-
-    # apply tiny rule bias by nudging the confidence toward bullish/bearish
-    bias = rule_bias(headline)
-    if sentiment == "Bullish" and bias < 0:
-        adj = max(0.0, base_conf + bias)  # reduce a bit
-    elif sentiment == "Bearish" and bias > 0:
-        adj = max(0.0, base_conf - bias)  # reduce a bit
-    else:
-        adj = min(1.0, max(0.0, base_conf + (bias if sentiment != "Neutral" else 0)))
-
-    confidence_pct = round(adj * 100, 1)
-    sector = detect_sector(headline)
-
-    return sentiment, confidence_pct, sector, bias
-
-# ---------- Smart explanation blocks ----------
-def render_explanation(sentiment: str, sector: str, confidence: float, bias: float, headline: str):
-    # Headline echo
-    st.write(f"**Headline:** {headline}")
-
-    # Richer explanation text
-    if sentiment == "Bullish":
-        st.success("Market tone appears optimistic 📈")
-        st.write(
-            "This headline communicates positive expectations or improving conditions. "
-            "Phrases like *raise, beat, strong demand, upgrade* tend to attract risk-on flows, "
-            "supporting momentum or follow-through buying if price and volume confirm. "
-            f"In the **{sector}** sector, optimism often translates to stronger short-term appetite for growth exposure."
-        )
-        st.write(
-            "**Suggested lens:** Watch for opening drive strength, pullback-to-VWAP entries, "
-            "or relative strength vs. sector peers. Manage risk around previous day highs and key levels."
-        )
-    elif sentiment == "Bearish":
-        st.error("Market tone appears cautious 📉")
-        st.write(
-            "Language such as *warns, cuts, probe, decline* signals uncertainty or risk aversion. "
-            "Headlines like this can prompt de-risking, mean-reversion fades, or rotation into defensives, "
-            f"especially within **{sector}** where policy, regulation, or funding conditions matter. "
-            "Expect choppier tape unless other catalysts offset the tone."
-        )
-        st.write(
-            "**Suggested lens:** Consider lower-highs/back-test failures, VWAP rejections, or put hedges. "
-            "Be mindful of oversold snapbacks if the move extends too quickly."
-        )
-    else:
-        st.info("Market tone appears neutral ⚖️")
-        st.write(
-            "Tone appears balanced — not clearly risk-on or risk-off. "
-            "Neutral headlines often reflect scheduled events, in-line data, or non-committal language. "
-            "Price usually waits for additional catalysts to set direction."
-        )
-        st.write(
-            "**Suggested lens:** Let price lead. Focus on range edges, liquidity zones, or confirmation from volume/market breadth."
-        )
-
-    # Tiny transparency note about rules
-    if abs(bias) > 0:
-        st.caption("ℹ️ Note: A small rules-based nudge was applied for finance phrases (e.g., 'raises guidance', 'warns'). FinBERT remains the primary signal.")
-
-    # Placeholder historical insight (MVP-friendly)
-    st.caption(
-        "📈 Historical pattern insight (preview): Similar-toned headlines have *sometimes* been followed by "
-        "short-term continuation when volume confirms. A full backtested view of analogous headlines "
-        "is coming soon."
-    )
-
-# ---------- UI ----------
-with st.form("analyze"):
-    headline = st.text_input("Headline", placeholder="e.g., NVIDIA raises revenue guidance on strong AI demand")
-    submitted = st.form_submit_button("Analyze")
-
-if submitted and headline.strip():
-    sentiment, conf, sector, bias = analyze(headline.strip())
-
-    st.subheader("📊 Result")
-    st.markdown(f"**Sentiment:** {sentiment}")
-    st.markdown(f"**Confidence:** {conf:.1f}%")
-    st.markdown(f"**Sector:** {sector}")
-
-    render_explanation(sentiment, sector, conf, bias, headline.strip())
-
-st.caption("Educational tool — not financial advice.")
+BULLISH_PATTERNS = {
+    # price/action
+    r"\bsoar(s|ed|ing)?\b": 0.30, r"\bsurge(s|d|ing)?\b": 0.28, r"\bjump(s|ed|ing)?\b": 0.26,
+    r"\brally(ies|ing)?\b": 0.26, r"\bpop(s|ped|ping)?\b": 0.20, r"\bspike(s|d|ing)?\b": 0.28,
+    r"\bskyrocket(s|ed|ing)?\b": 0.35, r"\bexplode(s|d|ing)?\b": 0.35, r"\bclimb(s|ed|ing)?\b": 0.18,
+    r"\brebound(s|ed|ing)?\b": 0.18, r"\brecover(s|ed|ing)?\b": 0.16,
+    # fundamentals / guidance
+    r"\bbeat(s|en)?\b": 0.22, r"\btops?\b": 0.20, r"\bcrush(es|ed|ing)?\b (estimates|EPS|revenue)": 0.30,
+    r"\braise(s|d|ing)? (guidance|outlook|forecast)\b": 0.32, r"\blift(s|ed|ing)? (guidance|outlook|forecast)\b": 0.28,
+    r"\bupgrade(s|d)?\b": 0.22, r"\bprice target (raised|hiked|lifted)\b": 0.24, r"\binitiates?\b (buy|overweight)\b": 0.26,
+    r"\bstrong demand\b": 0.26, r"\brecord (sales|profit|revenue)\b": 0.24,
+    # corporate actions / catalysts
+    r"\bapprov(al|ed|es)\b": 0.24, r"\bFDA (approves|approval)\b": 0.28, r"\bwins?\b (contract|order)\b": 0.22,
+    r"\bpartnership\b": 0.18, r"\bbuyback(s)?\b": 0.22, r"\bdividend (hike|increase|raised
