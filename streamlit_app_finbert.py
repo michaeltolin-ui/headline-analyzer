@@ -10,8 +10,8 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 # ---------------- Page ----------------
 st.set_page_config(page_title="Headline Analyzer (Distil Financial + Rules)", page_icon="🧠", layout="centered")
-st.title("🧠 AI Headline Analyzer — Distilled Financial Model + Rule Boosts")
-st.caption("Paste a market/financial headline → model + trader-phrase rules return Bullish/Bearish/Neutral, confidence, sector, and highlights.")
+st.title("🧠 AI Headline Analyzer")
+st.caption("Paste a market/financial headline → model returns Bullish/Bearish/Neutral, confidence, sector, and highlights.")
 
 # ---------------- Load distilled financial model ----------------
 @st.cache_resource(show_spinner=True)
